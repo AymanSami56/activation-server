@@ -1,1 +1,1 @@
-web: waitress-serve --port=5050 activation_server:app
+web: waitress-serve --port=$PORT activation_server:app
