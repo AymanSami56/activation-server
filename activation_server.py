@@ -14,9 +14,13 @@ import hashlib
 import json
 import os
 import re
-import smtplib
-import ssl
 from datetime import datetime, date, timedelta
+
+# لإرسال الإيميلات
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
 
 # ------------------ إعدادات عامة ------------------
 
@@ -61,60 +65,61 @@ def load_db():
     }
     لو كان ملف قديم (مجرد list) نحوله تلقائيًا.
     """
+
+    # --- الإعدادات الافتراضية الجديدة (تشمل SMTP) ---
+    default_settings = {
+        "admin_user": DEFAULT_ADMIN_USER,
+        "admin_pass": DEFAULT_ADMIN_PASS,
+        "secret_key": DEFAULT_SECRET_KEY,
+        "default_plan": "M",
+        "max_devices": 1000,
+        "admin_whatsapp": DEFAULT_ADMIN_WHATSAPP,
+
+        # === إعدادات الإيميل الجديدة ===
+        "email_enabled": False,       # تشغيل/إيقاف إرسال الإيميل
+        "smtp_server": "",
+        "smtp_port": 465,
+        "smtp_ssl": True,            # True = SMTP_SSL / False = STARTTLS
+        "smtp_user": "",
+        "smtp_password": "",
+        "admin_notify_email": ""      # اختياري – رسالة نسخة إلى المطوّر
+    }
+
+    # --- لو لا يوجد ملف DB ننشئ واحد جديد ---
     if not os.path.exists(DB_FILE):
         return {
-            "settings": {
-                "admin_user": DEFAULT_ADMIN_USER,
-                "admin_pass": DEFAULT_ADMIN_PASS,
-                "secret_key": DEFAULT_SECRET_KEY,
-                "default_plan": "M",
-                "max_devices": 1000,
-                "admin_whatsapp": DEFAULT_ADMIN_WHATSAPP
-            },
+            "settings": default_settings.copy(),
             "clients": []
         }
 
+    # --- محاولة تحميل الملف ---
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         return {
-            "settings": {
-                "admin_user": DEFAULT_ADMIN_USER,
-                "admin_pass": DEFAULT_ADMIN_PASS,
-                "secret_key": DEFAULT_SECRET_KEY,
-                "default_plan": "M",
-                "max_devices": 1000,
-                "admin_whatsapp": DEFAULT_ADMIN_WHATSAPP
-            },
+            "settings": default_settings.copy(),
             "clients": []
         }
 
-    # لو كان الملف عبارة عن list قديم نحوله
+    # --- لو كان الملف القديم عبارة عن قائمة فقط ---
     if isinstance(data, list):
         return {
-            "settings": {
-                "admin_user": DEFAULT_ADMIN_USER,
-                "admin_pass": DEFAULT_ADMIN_PASS,
-                "secret_key": DEFAULT_SECRET_KEY,
-                "default_plan": "M",
-                "max_devices": 1000,
-                "admin_whatsapp": DEFAULT_ADMIN_WHATSAPP
-            },
+            "settings": default_settings.copy(),
             "clients": data
         }
 
-    # تأكد من وجود المفاتيح
-    if "settings" not in data:
-        data["settings"] = {
-            "admin_user": DEFAULT_ADMIN_USER,
-            "admin_pass": DEFAULT_ADMIN_PASS,
-            "secret_key": DEFAULT_SECRET_KEY,
-            "default_plan": "M",
-            "max_devices": 1000,
-            "admin_whatsapp": DEFAULT_ADMIN_WHATSAPP
-        }
-    if "clients" not in data:
+    # --- تأكد من وجود settings ---
+    if "settings" not in data or not isinstance(data["settings"], dict):
+        data["settings"] = default_settings.copy()
+    else:
+        # أكمل المفاتيح الناقصة
+        for key, value in default_settings.items():
+            if key not in data["settings"]:
+                data["settings"][key] = value
+
+    # --- تأكد من وجود clients ---
+    if "clients" not in data or not isinstance(data["clients"], list):
         data["clients"] = []
 
     return data
@@ -146,7 +151,7 @@ def find_client_by_mid(clients, mid_norm):
 
 
 def generate_license_code(machine_id: str, plan: str, secret_key: str) -> str:
-    base = f"{machine_id}{plan}{secret_key}"
+    base = f"{machine_id}{plan}{secret_key}}"
     d = hashlib.sha256(base.encode("utf-8")).hexdigest()
     num = int(d, 16) % (10**16)
     return f"{num:016d}"
@@ -154,6 +159,7 @@ def generate_license_code(machine_id: str, plan: str, secret_key: str) -> str:
 
 def now_iso():
     return datetime.utcnow().isoformat()
+
 
 
 # ============================================================
