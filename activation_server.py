@@ -3,6 +3,7 @@
 #  - REST API للبرنامج AutoClicker
 #  - لوحة تحكم كاملة: Pending / Active / Banned / Settings / Details
 #  - يدعم Ban / Unban / Renew / Pause / Unactivate
+#  - إرسال إيميل للعميل عند التفعيل / التجديد
 # ===============================================================
 
 from flask import (
@@ -13,6 +14,8 @@ import hashlib
 import json
 import os
 import re
+import smtplib
+import ssl
 from datetime import datetime, date, timedelta
 
 # ------------------ إعدادات عامة ------------------
@@ -28,6 +31,17 @@ DEFAULT_ADMIN_PASS = "admin1234"   # أول مرة – غيّره من لوحة 
 
 # رقم الواتساب الافتراضي (يظهر للعميل في الردود)
 DEFAULT_ADMIN_WHATSAPP = "07829004566"
+
+# ------------------ إعدادات البريد (SMTP) ------------------
+# ✉ عدّل هذه القيم لاحقًا كما تريد
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 587
+SMTP_USER = "aimen.same2000@gmail.com"  # حساب الإرسال
+SMTP_PASS = "CHANGE_ME_APP_PASSWORD"    # ضع هنا App Password من جوجل
+SMTP_USE_TLS = True
+
+# رابط صفحة التحميل (GitHub أو غيره)
+DOWNLOAD_URL = "https://github.com/your-account/ayman-autoclicker"  # عدّل الرابط حسب مشروعك
 
 # Flask app
 app = Flask(__name__)
@@ -143,6 +157,81 @@ def now_iso():
 
 
 # ============================================================
+#  إرسال الإيميل للعميل عند التفعيل / التجديد
+# ============================================================
+
+def send_activation_email(client: dict, settings: dict, is_renew: bool = False):
+    """
+    يرسل رسالة إيميل للعميل تحتوي:
+    - اسم العميل
+    - Machine ID
+    - خطة الاشتراك
+    - كود التفعيل
+    - تاريخ انتهاء الاشتراك
+    - رابط التحميل
+    """
+    to_email = (client.get("email") or "").strip()
+    if not to_email:
+        # لا يوجد إيميل → لا ترسل شيء
+        return
+
+    subject = "تفعيل اشتراك Ayman Auto Clicker" if not is_renew else "تجديد اشتراك Ayman Auto Clicker"
+
+    name = client.get("name") or "عميلنا الكريم"
+    machine_id_disp = client.get("machine_id_display") or format_machine_id(client.get("machine_id", ""))
+    plan = client.get("plan", "M")
+    plan_text = "شهري (30 يوم)" if plan == "M" else "سنوي (365 يوم)"
+    expire_date = client.get("expire_date") or "-"
+    license_code = client.get("license_code") or "-"
+
+    whatsapp = settings.get("admin_whatsapp", DEFAULT_ADMIN_WHATSAPP)
+
+    text_body = f"""
+السلام عليكم {name}،
+
+شكراً لاستخدامك برنامج Ayman Auto Clicker.
+
+تم {'تفعيل' if not is_renew else 'تجديد'} اشتراكك بنجاح وفق البيانات التالية:
+
+- Machine ID: {machine_id_disp}
+- خطة الاشتراك: {plan_text}
+- كود التفعيل: {license_code}
+- تاريخ انتهاء الاشتراك: {expire_date}
+
+يمكنك تحميل أو تحديث البرنامج من الرابط التالي:
+{DOWNLOAD_URL}
+
+لأي استفسار أو مشكلة تقنية يمكنك التواصل على الواتساب:
+{whatsapp}
+
+تحياتنا،
+Ayman Software
+"""
+
+    msg = f"Subject: {subject}\r\n"
+    msg += "From: Ayman Software <" + SMTP_USER + ">\r\n"
+    msg += f"To: {to_email}\r\n"
+    msg += "Content-Type: text/plain; charset=utf-8\r\n"
+    msg += "\r\n"
+    msg += text_body
+
+    try:
+        if SMTP_USE_TLS:
+            context = ssl.create_default_context()
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.starttls(context=context)
+                server.login(SMTP_USER, SMTP_PASS)
+                server.sendmail(SMTP_USER, [to_email], msg.encode("utf-8"))
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.login(SMTP_USER, SMTP_PASS)
+                server.sendmail(SMTP_USER, [to_email], msg.encode("utf-8"))
+    except Exception as e:
+        # لا نكسر اللوحة إذا فشل الإرسال – فقط نطبع في اللوج
+        print("SMTP ERROR:", e)
+
+
+# ============================================================
 #  Authentication (لوحة الأدمن)
 # ============================================================
 
@@ -225,29 +314,56 @@ def api_request_activation():
                 "message": "هذا الجهاز محظور من قبل النظام."
             }), 403
 
-        # اكتشاف تلاعب بالبيانات
-        changed = False
-        if name and name != client.get("name"):
-            changed = True
-        if email and email != client.get("email"):
-            changed = True
-        if phone and phone != client.get("phone"):
-            changed = True
+        current_status = client.get("status")
 
-        if changed:
-            client["suspicious_count"] = client.get("suspicious_count", 0) + 1
+        # -----------------------------
+        # تجميد بيانات العميل بعد التفعيل
+        # -----------------------------
+        if current_status == "active":
+            # إذا حاول يغيّر الاسم/الإيميل/الهاتف → نعتبره تلاعب فقط
+            changed = False
+            if name and name != (client.get("name") or ""):
+                changed = True
+            if email and email != (client.get("email") or ""):
+                changed = True
+            if phone and phone != (client.get("phone") or ""):
+                changed = True
 
-        client["name"] = name or client.get("name", "")
-        client["email"] = email or client.get("email", "")
-        client["phone"] = phone or client.get("phone", "")
-        client["plan"] = plan
-        client["version"] = version or client.get("version", "")
-        client["system_info"] = system_info or client.get("system_info", {})
-        client["last_request_at"] = now
-        client["updated_at"] = now
+            if changed:
+                client["suspicious_count"] = client.get("suspicious_count", 0) + 1
 
-        if client.get("status") in (None, "", "not_found"):
-            client["status"] = "pending"
+            # لا نغيّر بيانات الهوية بعد التفعيل
+            # فقط نحدّث معلومات النظام والإصدار وتاريخ الطلب
+            client["version"] = version or client.get("version", "")
+            client["system_info"] = system_info or client.get("system_info", {})
+            client["last_request_at"] = now
+            client["updated_at"] = now
+
+        else:
+            # الجهاز غير مفعّل بعد → مسموح تحديث البيانات
+            changed = False
+            if name and name != client.get("name"):
+                changed = True
+            if email and email != client.get("email"):
+                changed = True
+            if phone and phone != client.get("phone"):
+                changed = True
+
+            if changed:
+                client["suspicious_count"] = client.get("suspicious_count", 0) + 1
+
+            client["name"] = name or client.get("name", "")
+            client["email"] = email or client.get("email", "")
+            client["phone"] = phone or client.get("phone", "")
+            client["plan"] = plan
+            client["version"] = version or client.get("version", "")
+            client["system_info"] = system_info or client.get("system_info", {})
+            client["last_request_at"] = now
+            client["updated_at"] = now
+
+            if client.get("status") in (None, "", "not_found", "rejected", "expired", "paused"):
+                client["status"] = "pending"
+
     else:
         # عميل جديد
         new_client = {
@@ -487,6 +603,7 @@ DASHBOARD_TEMPLATE = """
     <div class="col-md-3">
       <div class="card text-bg-danger mb-2">
         <div class="card-body py-2">
+          <div class="d-flex justify
           <div class="d-flex justify-content-between">
             <span>Banned</span>
             <strong>{{ banned_count }}</strong>
@@ -904,7 +1021,10 @@ def admin_action():
         client["license_code"] = code
         client["expire_date"] = exp.isoformat()
         client["updated_at"] = now
-        flash("تم تفعيل الجهاز", "success")
+        save_db(db)
+        # إرسال إيميل تفعيل
+        send_activation_email(client, settings, is_renew=False)
+        flash("تم تفعيل الجهاز وتم إرسال إيميل للعميل (إن وُجد بريد).", "success")
 
     elif action == "renew":
         plan = client.get("plan") or settings.get("default_plan", "M")
@@ -923,21 +1043,27 @@ def admin_action():
         client["plan"] = plan
         client["expire_date"] = exp.isoformat()
         client["updated_at"] = now
-        flash("تم تجديد الاشتراك", "success")
+        save_db(db)
+        # إرسال إيميل تجديد
+        send_activation_email(client, settings, is_renew=True)
+        flash("تم تجديد الاشتراك وتم إرسال إيميل للعميل (إن وُجد بريد).", "success")
 
     elif action == "pause":
         client["status"] = "paused"
         client["updated_at"] = now
+        save_db(db)
         flash("تم إيقاف الجهاز مؤقتاً (Paused)", "warning")
 
     elif action == "unactivate":
         client["status"] = "expired"
         client["updated_at"] = now
+        save_db(db)
         flash("تم إلغاء تفعيل الجهاز (تحويله إلى Expired)", "secondary")
 
     elif action == "reject":
         client["status"] = "rejected"
         client["updated_at"] = now
+        save_db(db)
         flash("تم رفض طلب التفعيل", "secondary")
 
     elif action == "ban":
@@ -946,18 +1072,19 @@ def admin_action():
         client["license_code"] = None
         client["expire_date"] = None
         client["updated_at"] = now
+        save_db(db)
         flash("تم حظر الجهاز", "danger")
 
     elif action == "unban":
         client["status"] = "pending"
         client["banned_reason"] = None
         client["updated_at"] = now
+        save_db(db)
         flash("تم إلغاء الحظر. حالة الجهاز الآن Pending", "success")
 
     else:
         flash("إجراء غير معروف", "danger")
 
-    save_db(db)
     return redirect(url_for("admin_dashboard"))
 
 
@@ -968,3 +1095,4 @@ def admin_action():
 if __name__ == "__main__":
     # للتجربة محلياً:
     app.run(host="0.0.0.0", port=5050, debug=True)
+
