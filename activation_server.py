@@ -36,13 +36,6 @@ DEFAULT_ADMIN_PASS = "admin1234"   # أول مرة – غيّره من لوحة 
 # رقم الواتساب الافتراضي (يظهر للعميل في الردود)
 DEFAULT_ADMIN_WHATSAPP = "07829004566"
 
-# ------------------ إعدادات البريد (SMTP) ------------------
-# ✉ عدّل هذه القيم لاحقًا كما تريد
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_USER = "aimen.same2000@gmail.com"  # حساب الإرسال
-SMTP_PASS = "CHANGE_ME_APP_PASSWORD"    # ضع هنا App Password من جوجل
-SMTP_USE_TLS = True
 
 # رابط صفحة التحميل (GitHub أو غيره)
 DOWNLOAD_URL = "https://github.com/your-account/ayman-autoclicker"  # عدّل الرابط حسب مشروعك
@@ -63,10 +56,9 @@ def load_db():
       "settings": {...},
       "clients": [ {...}, {...} ]
     }
-    لو كان ملف قديم (مجرد list) نحوله تلقائيًا.
     """
 
-    # --- الإعدادات الافتراضية الجديدة (تشمل SMTP) ---
+    # --- الإعدادات الافتراضية (تشمل SMTP) ---
     default_settings = {
         "admin_user": DEFAULT_ADMIN_USER,
         "admin_pass": DEFAULT_ADMIN_PASS,
@@ -75,41 +67,42 @@ def load_db():
         "max_devices": 1000,
         "admin_whatsapp": DEFAULT_ADMIN_WHATSAPP,
 
-        # === إعدادات الإيميل الجديدة ===
-        "email_enabled": False,       # تشغيل/إيقاف إرسال الإيميل
-        "smtp_server": "",
-        "smtp_port": 465,
-        "smtp_ssl": True,            # True = SMTP_SSL / False = STARTTLS
+        # === إعدادات الإيميل ===
+        "email_enabled": False,      # تشغيل/إيقاف الإيميل
+        "smtp_server": "smtp.gmail.com",
+        "smtp_port": 587,
+        "smtp_ssl": False,           # False = TLS / True = SSL
         "smtp_user": "",
         "smtp_password": "",
-        "admin_notify_email": ""      # اختياري – رسالة نسخة إلى المطوّر
+        "smtp_sender": "Ayman Software <noreply@ayman.com>",
+        "admin_notify_email": ""
     }
 
-    # --- لو لا يوجد ملف DB ننشئ واحد جديد ---
+    # --- إنشاء الملف إذا غير موجود ---
     if not os.path.exists(DB_FILE):
         return {
             "settings": default_settings.copy(),
             "clients": []
         }
 
-    # --- محاولة تحميل الملف ---
+    # --- تحميل DB ---
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except Exception:
+    except:
         return {
             "settings": default_settings.copy(),
             "clients": []
         }
 
-    # --- لو كان الملف القديم عبارة عن قائمة فقط ---
+    # --- تحويل الملف القديم (list فقط) ---
     if isinstance(data, list):
         return {
             "settings": default_settings.copy(),
             "clients": data
         }
 
-    # --- تأكد من وجود settings ---
+    # --- تأكد من settings ---
     if "settings" not in data or not isinstance(data["settings"], dict):
         data["settings"] = default_settings.copy()
     else:
@@ -118,7 +111,7 @@ def load_db():
             if key not in data["settings"]:
                 data["settings"][key] = value
 
-    # --- تأكد من وجود clients ---
+    # --- تأكد من clients ---
     if "clients" not in data or not isinstance(data["clients"], list):
         data["clients"] = []
 
@@ -151,7 +144,7 @@ def find_client_by_mid(clients, mid_norm):
 
 
 def generate_license_code(machine_id: str, plan: str, secret_key: str) -> str:
-    base = f"{machine_id}{plan}{secret_key}}"
+    base = f"{machine_id}{plan}{secret_key}"
     d = hashlib.sha256(base.encode("utf-8")).hexdigest()
     num = int(d, 16) % (10**16)
     return f"{num:016d}"
@@ -161,80 +154,110 @@ def now_iso():
     return datetime.utcnow().isoformat()
 
 
+# ============================================================
+#  نظام إرسال الإيميل SMTP
+# ============================================================
+
+import smtplib
+import ssl
+from email.message import EmailMessage
+
+def send_email_smtp(to_email: str, subject: str, body: str, settings: dict):
+    """
+    يرسل رسالة إيميل عبر SMTP.
+    """
+
+    if not settings.get("email_enabled"):
+        return False
+
+    smtp_user = settings.get("smtp_user")
+    smtp_pass = settings.get("smtp_password")
+    smtp_server = settings.get("smtp_server")
+    smtp_port = int(settings.get("smtp_port", 587))
+    smtp_ssl = settings.get("smtp_ssl", False)
+    smtp_sender = settings.get("smtp_sender", smtp_user)
+
+    if not smtp_user or not smtp_pass or not smtp_server:
+        return False  # إعدادات ناقصة
+
+    msg = EmailMessage()
+    msg["From"] = smtp_sender
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    try:
+        if smtp_ssl:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_server, smtp_port, context=context) as server:
+                server.login(smtp_user, smtp_pass)
+                server.send_message(msg)
+
+        else:
+            with smtplib.SMTP(smtp_server, smtp_port) as server:
+                server.starttls()
+                server.login(smtp_user, smtp_pass)
+                server.send_message(msg)
+
+        # إرسال نسخة إلى المطور
+        dev_email = settings.get("admin_notify_email")
+        if dev_email:
+            msg["To"] = dev_email
+            server.send_message(msg)
+
+        return True
+
+    except Exception as e:
+        print("SMTP Error:", e)
+        return False
+
 
 # ============================================================
 #  إرسال الإيميل للعميل عند التفعيل / التجديد
 # ============================================================
 
 def send_activation_email(client: dict, settings: dict, is_renew: bool = False):
-    """
-    يرسل رسالة إيميل للعميل تحتوي:
-    - اسم العميل
-    - Machine ID
-    - خطة الاشتراك
-    - كود التفعيل
-    - تاريخ انتهاء الاشتراك
-    - رابط التحميل
-    """
     to_email = (client.get("email") or "").strip()
     if not to_email:
-        # لا يوجد إيميل → لا ترسل شيء
         return
 
-    subject = "تفعيل اشتراك Ayman Auto Clicker" if not is_renew else "تجديد اشتراك Ayman Auto Clicker"
-
     name = client.get("name") or "عميلنا الكريم"
-    machine_id_disp = client.get("machine_id_display") or format_machine_id(client.get("machine_id", ""))
+    machine_id_disp = client.get("machine_id_display") or "-"
     plan = client.get("plan", "M")
-    plan_text = "شهري (30 يوم)" if plan == "M" else "سنوي (365 يوم)"
     expire_date = client.get("expire_date") or "-"
     license_code = client.get("license_code") or "-"
-
     whatsapp = settings.get("admin_whatsapp", DEFAULT_ADMIN_WHATSAPP)
 
-    text_body = f"""
-السلام عليكم {name}،
+    plan_text = "شهري (30 يوم)" if plan == "M" else "سنوي (365 يوم)"
 
-شكراً لاستخدامك برنامج Ayman Auto Clicker.
+    subject = (
+        "تم تفعيل اشتراكك في Ayman Auto Clicker"
+        if not is_renew else
+        "تم تجديد اشتراكك في Ayman Auto Clicker"
+    )
 
-تم {'تفعيل' if not is_renew else 'تجديد'} اشتراكك بنجاح وفق البيانات التالية:
+    body = f"""
+مرحباً {name}،
 
+تم {'تفعيل' if not is_renew else 'تجديد'} اشتراكك في برنامج Ayman Auto Clicker.
+
+البيانات:
 - Machine ID: {machine_id_disp}
-- خطة الاشتراك: {plan_text}
+- الخطة: {plan_text}
 - كود التفعيل: {license_code}
-- تاريخ انتهاء الاشتراك: {expire_date}
+- ينتهي في: {expire_date}
 
-يمكنك تحميل أو تحديث البرنامج من الرابط التالي:
-{DOWNLOAD_URL}
+رابط التحميل:
+https://example.com/ayman-autoclicker
 
-لأي استفسار أو مشكلة تقنية يمكنك التواصل على الواتساب:
-{whatsapp}
+للدعم الفني:
+واتساب: {whatsapp}
 
 تحياتنا،
 Ayman Software
 """
 
-    msg = f"Subject: {subject}\r\n"
-    msg += "From: Ayman Software <" + SMTP_USER + ">\r\n"
-    msg += f"To: {to_email}\r\n"
-    msg += "Content-Type: text/plain; charset=utf-8\r\n"
-    msg += "\r\n"
-    msg += text_body
-
-    try:
-        if SMTP_USE_TLS:
-            context = ssl.create_default_context()
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-                server.starttls(context=context)
-                server.login(SMTP_USER, SMTP_PASS)
-                server.sendmail(SMTP_USER, [to_email], msg.encode("utf-8"))
-        else:
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-                server.login(SMTP_USER, SMTP_PASS)
-                server.sendmail(SMTP_USER, [to_email], msg.encode("utf-8"))
-    except Exception as e:
-        # لا نكسر اللوحة إذا فشل الإرسال – فقط نطبع في اللوج
-        print("SMTP ERROR:", e)
+    send_email_smtp(to_email, subject, body, settings)
 
 
 # ============================================================
@@ -906,10 +929,12 @@ SETTINGS_TEMPLATE = """
 <nav class="navbar navbar-dark bg-dark">
   <div class="container-fluid">
     <span class="navbar-brand">إعدادات لوحة التفعيل</span>
-    <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-light btn-sm">رجوع للوحة</a>
+    <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-light btn-sm">رجوع</a>
   </div>
 </nav>
+
 <div class="container my-3">
+
   {% with messages = get_flashed_messages(with_categories=true) %}
   {% if messages %}
     {% for cat, msg in messages %}
@@ -919,67 +944,81 @@ SETTINGS_TEMPLATE = """
   {% endwith %}
 
   <form method="post" class="card p-3 shadow-sm">
+
+    <h5>إعدادات حساب الأدمن</h5>
+    <hr>
     <div class="mb-3">
-      <label class="form-label">اسم المستخدم للأدمن</label>
+      <label class="form-label">اسم المستخدم</label>
       <input type="text" name="admin_user" class="form-control" value="{{ settings.admin_user }}">
     </div>
     <div class="mb-3">
-      <label class="form-label">كلمة المرور للأدمن</label>
+      <label class="form-label">كلمة المرور</label>
       <input type="text" name="admin_pass" class="form-control" value="{{ settings.admin_pass }}">
-      <div class="form-text text-danger">⚠ احفظ هذه القيم في مكان آمن، أي شخص يعرفها يستطيع الدخول للوحة.</div>
     </div>
+
+    <h5 class="mt-4">مفتاح التفعيل (SECRET KEY)</h5>
+    <hr>
     <div class="mb-3">
-      <label class="form-label">SECRET_KEY المستخدم في التفعيل</label>
+      <label class="form-label">Secret Key</label>
       <input type="text" name="secret_key" class="form-control" value="{{ settings.secret_key }}">
-      <div class="form-text text-danger">
-        ⚠ تغيير هذا المفتاح يعني أن الأكواد القديمة لن تعمل،
-        ويجب تحديث البرنامج والكيجن على نفس المفتاح الجديد.
-      </div>
     </div>
+
+    <h5 class="mt-4">إعدادات SMTP (إرسال الإيميل)</h5>
+    <hr>
+
+    <div class="form-check form-switch mb-3">
+      <input class="form-check-input" type="checkbox" name="email_enabled" value="1"
+             {% if settings.email_enabled %}checked{% endif %}>
+      <label class="form-check-label">تفعيل إرسال الإيميل للعميل عند التفعيل/التجديد</label>
+    </div>
+
     <div class="mb-3">
-      <label class="form-label">الخطة الافتراضية</label>
-      <select name="default_plan" class="form-select">
-        <option value="M" {% if settings.default_plan == 'M' %}selected{% endif %}>شهري (30 يوم)</option>
-        <option value="Y" {% if settings.default_plan == 'Y' %}selected{% endif %}>سنوي (365 يوم)</option>
-      </select>
+      <label class="form-label">SMTP Server</label>
+      <input type="text" name="smtp_server" class="form-control" value="{{ settings.smtp_server }}">
     </div>
+
     <div class="mb-3">
-      <label class="form-label">الحد الأقصى للأجهزة المسجلة (إحصائي فقط)</label>
-      <input type="number" name="max_devices" class="form-control" value="{{ settings.max_devices }}">
+      <label class="form-label">SMTP Port</label>
+      <input type="number" name="smtp_port" class="form-control" value="{{ settings.smtp_port }}">
     </div>
+
+    <div class="form-check form-switch mb-3">
+      <input class="form-check-input" type="checkbox" name="smtp_ssl" value="1"
+             {% if settings.smtp_ssl %}checked{% endif %}>
+      <label class="form-check-label">استخدام SSL بدلاً من TLS</label>
+    </div>
+
     <div class="mb-3">
-      <label class="form-label">رقم الواتساب الافتراضي</label>
-      <input type="text" name="admin_whatsapp" class="form-control" value="{{ settings.admin_whatsapp }}">
+      <label class="form-label">SMTP Username</label>
+      <input type="text" name="smtp_user" class="form-control" value="{{ settings.smtp_user }}">
     </div>
-    <button class="btn btn-primary">حفظ الإعدادات</button>
+
+    <div class="mb-3">
+      <label class="form-label">SMTP Password</label>
+      <input type="password" name="smtp_password" class="form-control" value="{{ settings.smtp_password }}">
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">البريد المُرسل (From)</label>
+      <input type="text" name="smtp_sender" class="form-control" value="{{ settings.smtp_sender }}">
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">إرسال نسخة إلى بريد المطوّر (اختياري)</label>
+      <input type="text" name="admin_notify_email" class="form-control" value="{{ settings.admin_notify_email }}">
+    </div>
+
+    <button class="btn btn-primary mt-3">حفظ الإعدادات</button>
+
+    <a href="{{ url_for('test_smtp') }}" class="btn btn-success mt-3 float-end">
+      اختبار إرسال إيميل تجريبي
+    </a>
+
   </form>
 </div>
 </body>
 </html>
 """
-
-@app.route("/admin/settings", methods=["GET", "POST"])
-@login_required
-def admin_settings():
-    db = load_db()
-    settings = db["settings"]
-
-    if request.method == "POST":
-        settings["admin_user"] = request.form.get("admin_user", settings["admin_user"])
-        settings["admin_pass"] = request.form.get("admin_pass", settings["admin_pass"])
-        settings["secret_key"] = request.form.get("secret_key", settings["secret_key"])
-        settings["default_plan"] = request.form.get("default_plan", settings["default_plan"])
-        try:
-            settings["max_devices"] = int(request.form.get("max_devices", settings["max_devices"]))
-        except:
-            pass
-        settings["admin_whatsapp"] = request.form.get("admin_whatsapp", settings["admin_whatsapp"])
-        db["settings"] = settings
-        save_db(db)
-        flash("تم حفظ الإعدادات بنجاح", "success")
-        return redirect(url_for("admin_settings"))
-
-    return render_template_string(SETTINGS_TEMPLATE, settings=settings)
 
 
 # ============================================================
@@ -1093,6 +1132,167 @@ def admin_action():
 
     return redirect(url_for("admin_dashboard"))
 
+@app.route("/admin/test_smtp")
+@login_required
+def test_smtp():
+    db = load_db()
+    settings = db["settings"]
+
+    test_email = settings.get("admin_notify_email") or settings.get("smtp_user")
+
+    if not test_email:
+        flash("لا يوجد بريد لإرسال الاختبار. ضع بريد مطوّر أو SMTP User.", "danger")
+        return redirect(url_for("admin_settings"))
+
+    ok = send_email_smtp(
+        test_email,
+        "اختبار SMTP - Ayman Activation Server",
+        "هذه رسالة اختبار من سيرفر Ayman Auto Clicker.\nإذا وصلتك بنجاح فالإعدادات صحيحة.",
+        settings
+    )
+
+    if ok:
+        flash(f"✔ تم إرسال رسالة اختبار إلى {test_email}", "success")
+    else:
+        flash("✖ فشل في الإرسال. تأكد من إعدادات SMTP.", "danger")
+
+    return redirect(url_for("admin_settings"))
+# ============================================================
+#  صفحة إعدادات اللوحة (تشمل SMTP)
+# ============================================================
+
+SETTINGS_TEMPLATE = """
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <title>إعدادات السيرفر</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+
+<nav class="navbar navbar-dark bg-dark">
+  <div class="container-fluid">
+    <span class="navbar-brand">إعدادات السيرفر</span>
+    <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-light btn-sm">رجوع</a>
+  </div>
+</nav>
+
+<div class="container my-4">
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for cat, msg in messages %}
+      <div class="alert alert-{{cat}} py-1 my-1">{{ msg }}</div>
+    {% endfor %}
+  {% endif %}
+  {% endwith %}
+
+  <form method="post" class="card shadow p-3">
+
+    <h5>بيانات الأدمن</h5>
+    <div class="mb-3">
+      <label class="form-label">اسم المستخدم</label>
+      <input type="text" name="admin_user" class="form-control" value="{{ settings.admin_user }}">
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">كلمة المرور</label>
+      <input type="text" name="admin_pass" class="form-control" value="{{ settings.admin_pass }}">
+    </div>
+
+    <hr>
+    <h5>إعدادات التفعيل (Secret Key)</h5>
+
+    <div class="mb-3">
+      <label class="form-label">SECRET_KEY</label>
+      <input type="text" name="secret_key" class="form-control" value="{{ settings.secret_key }}">
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">الخطة الافتراضية</label>
+      <select name="default_plan" class="form-select">
+        <option value="M" {% if settings.default_plan == 'M' %}selected{% endif %}>شهري</option>
+        <option value="Y" {% if settings.default_plan == 'Y' %}selected{% endif %}>سنوي</option>
+      </select>
+    </div>
+
+    <hr>
+    <h5>إعدادات SMTP (إرسال الإيميل)</h5>
+
+    <div class="form-check form-switch mb-3">
+      <input class="form-check-input" type="checkbox" name="email_enabled" {% if settings.email_enabled %}checked{% endif %}>
+      <label class="form-check-label">تفعيل إرسال الإيميل</label>
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">SMTP Server</label>
+      <input type="text" name="smtp_server" class="form-control" value="{{ settings.smtp_server }}">
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">SMTP Port</label>
+      <input type="number" name="smtp_port" class="form-control" value="{{ settings.smtp_port }}">
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">SMTP User (البريد الذي يرسل منه)</label>
+      <input type="text" name="smtp_user" class="form-control" value="{{ settings.smtp_user }}">
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">SMTP Password</label>
+      <input type="password" name="smtp_password" class="form-control" value="{{ settings.smtp_password }}">
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">إرسال نسخة للمطور (اختياري)</label>
+      <input type="text" name="admin_notify_email" class="form-control" value="{{ settings.admin_notify_email }}">
+    </div>
+
+    <div class="form-check form-switch mb-3">
+      <input class="form-check-input" type="checkbox" name="smtp_ssl" {% if settings.smtp_ssl %}checked{% endif %}>
+      <label class="form-check-label">استخدام SMTP_SSL (إن لم تفعّل سيتم استخدام STARTTLS)</label>
+    </div>
+
+    <button class="btn btn-primary mt-2">حفظ الإعدادات</button>
+
+    <a href="{{ url_for('test_smtp') }}" class="btn btn-secondary mt-2">اختبار الإيميل</a>
+
+  </form>
+
+</div>
+</body>
+</html>
+"""
+
+
+@app.route("/admin/settings", methods=["GET", "POST"])
+@login_required
+def admin_settings():
+    db = load_db()
+    settings = db["settings"]
+
+    if request.method == "POST":
+        settings["admin_user"] = request.form.get("admin_user", settings["admin_user"])
+        settings["admin_pass"] = request.form.get("admin_pass", settings["admin_pass"])
+
+        settings["secret_key"] = request.form.get("secret_key", settings["secret_key"])
+        settings["default_plan"] = request.form.get("default_plan", settings["default_plan"])
+
+        settings["email_enabled"] = True if request.form.get("email_enabled") == "on" else False
+        settings["smtp_server"] = request.form.get("smtp_server", settings["smtp_server"])
+        settings["smtp_port"] = int(request.form.get("smtp_port", settings["smtp_port"]))
+        settings["smtp_user"] = request.form.get("smtp_user", settings["smtp_user"])
+        settings["smtp_password"] = request.form.get("smtp_password", settings["smtp_password"])
+        settings["smtp_ssl"] = True if request.form.get("smtp_ssl") == "on" else False
+        settings["admin_notify_email"] = request.form.get("admin_notify_email", settings["admin_notify_email"])
+
+        save_db(db)
+        flash("تم حفظ الإعدادات بنجاح ✔", "success")
+        return redirect(url_for("admin_settings"))
+
+    return render_template_string(SETTINGS_TEMPLATE, settings=settings)
 
 # ============================================================
 # Main
