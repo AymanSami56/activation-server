@@ -1,0 +1,10 @@
+Flask
+requests
+pyopenssl
+itsdangerous
+Werkzeug
+Jinja2
+certifi
+python-dateutil
+# New dependencies for Admin and SMTP:
+python-dotenv
