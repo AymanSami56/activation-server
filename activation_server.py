@@ -22,12 +22,14 @@ from email.header import Header
 
 # ------------------ إعدادات عامة ------------------
 
-# ملف قاعدة البيانات (سيحتوي على الإعدادات والعملاء)
+# ملف قاعدة البيانات
 DB_FILE = "server_db.json" 
 
 # إعدادات الدخول الافتراضية
 DEFAULT_ADMIN_USER = "admin"
-DEFAULT_ADMIN_PASS = "admin1234"   # ⚠️ يجب تغييره فوراً
+# قم بتغيير القيمة الافتراضية إلى الهاش المشفر لكلمة "admin1234"
+# (هذا سيجعل التحقق يعمل مباشرة)
+DEFAULT_ADMIN_PASS = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"  
 DEFAULT_SECRET_KEY = "AYMAN_SUPER_SECRET_2025"
 
 # ------------------ تهيئة التطبيق ------------------
@@ -361,4 +363,5 @@ if __name__ == '__main__':
     # تأكد من تحميل قاعدة البيانات عند التشغيل
     get_db()
     # يتم تشغيل Flask في وضع التطوير، استخدم Waitress للإنتاج (كما في Procfile.txt)
+
     app.run(debug=True, host='0.0.0.0', port=5000)
