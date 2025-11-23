@@ -6,5 +6,6 @@ Werkzeug
 Jinja2
 certifi
 python-dateutil
-# New dependencies for Admin and SMTP:
+gunicorn  # (موصى به كبديل لـ Waitress)
+waitress  # ⬅️ أضف هذا السطر
 python-dotenv
