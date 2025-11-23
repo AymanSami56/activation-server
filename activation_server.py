@@ -1,8 +1,9 @@
 # ===============================================================
-#  Ayman Activation Server + Admin Panel (Bootstrap)
+#  Ayman Activation Server + Admin Panel PRO (Bootstrap + Charts)
 #  - REST API للبرنامج AutoClicker
-#  - لوحة تحكم كاملة: Pending / Active / Banned / Settings / Details
-#  - يدعم Ban / Unban / Renew / Pause / Unactivate
+#  - لوحة تحكم احترافية: Dashboard / Pending / Active / Banned / Settings / Logs / Device Details
+#  - Ban / Unban / Renew / Pause / Unactivate / Delete
+#  - Logs لكل عمليات الأدمن
 #  - إرسال إيميل للعميل عند التفعيل / التجديد
 # ===============================================================
 
@@ -21,8 +22,9 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-
-# ------------------ إعدادات عامة ------------------
+# ============================================================
+#  إعدادات عامة
+# ============================================================
 
 DB_FILE = "clients_db.json"
 
@@ -36,7 +38,6 @@ DEFAULT_ADMIN_PASS = "admin1234"   # أول مرة – غيّره من لوحة 
 # رقم الواتساب الافتراضي (يظهر للعميل في الردود)
 DEFAULT_ADMIN_WHATSAPP = "07829004566"
 
-
 # رابط صفحة التحميل (GitHub أو غيره)
 DOWNLOAD_URL = "https://github.com/your-account/ayman-autoclicker"  # عدّل الرابط حسب مشروعك
 
@@ -49,12 +50,17 @@ app.secret_key = "CHANGE_ME_SESSION_SECRET_AYMAN"  # غيّره في السير�
 #  دوال مساعدة للـ DB
 # ============================================================
 
+def now_iso():
+    return datetime.utcnow().isoformat()
+
+
 def load_db():
     """
     بنية ملف JSON:
     {
       "settings": {...},
-      "clients": [ {...}, {...} ]
+      "clients": [ {...}, {...} ],
+      "logs": [ {...}, ... ]
     }
     """
 
@@ -78,11 +84,12 @@ def load_db():
         "admin_notify_email": ""
     }
 
-    # --- إنشاء الملف إذا غير موجود ---
+    # --- إذا الملف غير موجود ---
     if not os.path.exists(DB_FILE):
         return {
             "settings": default_settings.copy(),
-            "clients": []
+            "clients": [],
+            "logs": []
         }
 
     # --- تحميل DB ---
@@ -92,28 +99,33 @@ def load_db():
     except:
         return {
             "settings": default_settings.copy(),
-            "clients": []
+            "clients": [],
+            "logs": []
         }
 
     # --- تحويل الملف القديم (list فقط) ---
     if isinstance(data, list):
         return {
             "settings": default_settings.copy(),
-            "clients": data
+            "clients": data,
+            "logs": []
         }
 
-    # --- تأكد من settings ---
+    # تأكد من settings
     if "settings" not in data or not isinstance(data["settings"], dict):
         data["settings"] = default_settings.copy()
     else:
-        # أكمل المفاتيح الناقصة
         for key, value in default_settings.items():
             if key not in data["settings"]:
                 data["settings"][key] = value
 
-    # --- تأكد من clients ---
+    # تأكد من clients
     if "clients" not in data or not isinstance(data["clients"], list):
         data["clients"] = []
+
+    # تأكد من logs
+    if "logs" not in data or not isinstance(data["logs"], list):
+        data["logs"] = []
 
     return data
 
@@ -121,6 +133,23 @@ def load_db():
 def save_db(db):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(db, f, indent=4, ensure_ascii=False)
+
+
+def add_log(db, action, machine_id=None, note="", level="info"):
+    """
+    إضافة سجل في logs (لا تستدعي save_db هنا، اتركه للمستدعي)
+    """
+    logs = db.setdefault("logs", [])
+    logs.append({
+        "time": now_iso(),
+        "action": action,
+        "machine_id": machine_id,
+        "note": note,
+        "level": level
+    })
+    # تقليل الحجم إذا كبر كثيراً
+    if len(logs) > 1000:
+        del logs[:-1000]
 
 
 def normalize_machine_id(raw: str) -> str:
@@ -148,10 +177,6 @@ def generate_license_code(machine_id: str, plan: str, secret_key: str) -> str:
     d = hashlib.sha256(base.encode("utf-8")).hexdigest()
     num = int(d, 16) % (10**16)
     return f"{num:016d}"
-
-
-def now_iso():
-    return datetime.utcnow().isoformat()
 
 
 # ============================================================
@@ -202,8 +227,12 @@ def send_email_smtp(to_email: str, subject: str, body: str, settings: dict):
         # إرسال نسخة إلى المطور
         dev_email = settings.get("admin_notify_email")
         if dev_email:
-            msg["To"] = dev_email
-            server.send_message(msg)
+            msg2 = EmailMessage()
+            msg2["From"] = smtp_sender
+            msg2["To"] = dev_email
+            msg2["Subject"] = f"[Copy] {subject}"
+            msg2.set_content(body)
+            server.send_message(msg2)
 
         return True
 
@@ -248,7 +277,7 @@ def send_activation_email(client: dict, settings: dict, is_renew: bool = False):
 - ينتهي في: {expire_date}
 
 رابط التحميل:
-https://example.com/ayman-autoclicker
+{DOWNLOAD_URL}
 
 للدعم الفني:
 واتساب: {whatsapp}
@@ -291,23 +320,10 @@ def home():
 
 # ============================================================
 #  1) API: طلب تفعيل من داخل البرنامج
-#      AutoClicker_final.py → POST /api/request_activation
 # ============================================================
 
 @app.route("/api/request_activation", methods=["POST"])
 def api_request_activation():
-    """
-    JSON:
-      {
-        "name": "...",
-        "email": "...",
-        "phone": "...",
-        "machine_id": "XXXX-XXXX-XXXX-XXXX",
-        "plan": "M" or "Y",
-        "version": "3.2.0",
-        "system": {...}   # system info from client
-      }
-    """
     db = load_db()
     settings = db["settings"]
     clients = db["clients"]
@@ -331,12 +347,10 @@ def api_request_activation():
     mid_norm = normalize_machine_id(raw_mid)
 
     client = find_client_by_mid(clients, mid_norm)
-
     now = now_iso()
 
     # لو العميل موجود
     if client:
-        # لو محظور → لا نقبل طلبات جديدة
         if client.get("status") == "banned":
             return jsonify({
                 "status": "banned",
@@ -345,11 +359,7 @@ def api_request_activation():
 
         current_status = client.get("status")
 
-        # -----------------------------
-        # تجميد بيانات العميل بعد التفعيل
-        # -----------------------------
         if current_status == "active":
-            # إذا حاول يغيّر الاسم/الإيميل/الهاتف → نعتبره تلاعب فقط
             changed = False
             if name and name != (client.get("name") or ""):
                 changed = True
@@ -361,15 +371,12 @@ def api_request_activation():
             if changed:
                 client["suspicious_count"] = client.get("suspicious_count", 0) + 1
 
-            # لا نغيّر بيانات الهوية بعد التفعيل
-            # فقط نحدّث معلومات النظام والإصدار وتاريخ الطلب
             client["version"] = version or client.get("version", "")
             client["system_info"] = system_info or client.get("system_info", {})
             client["last_request_at"] = now
             client["updated_at"] = now
 
         else:
-            # الجهاز غير مفعّل بعد → مسموح تحديث البيانات
             changed = False
             if name and name != client.get("name"):
                 changed = True
@@ -394,7 +401,6 @@ def api_request_activation():
                 client["status"] = "pending"
 
     else:
-        # عميل جديد
         new_client = {
             "id": len(clients) + 1,
             "name": name,
@@ -404,7 +410,7 @@ def api_request_activation():
             "machine_id_display": format_machine_id(mid_norm),
             "plan": plan,
             "license_code": None,
-            "status": "pending",    # pending / active / expired / banned / paused / rejected
+            "status": "pending",
             "created_at": now,
             "updated_at": now,
             "expire_date": None,
@@ -417,6 +423,7 @@ def api_request_activation():
         }
         clients.append(new_client)
 
+    add_log(db, "api_request_activation", mid_norm, note="جهاز أرسل طلب تفعيل")
     save_db(db)
 
     return jsonify({
@@ -428,25 +435,10 @@ def api_request_activation():
 
 # ============================================================
 #  2) API: تحقق من حالة التفعيل
-#      AutoClicker_final.py → GET /api/check_status
 # ============================================================
 
 @app.route("/api/check_status", methods=["GET"])
 def api_check_status():
-    """
-    GET /api/check_status?machine_id=XXXX
-    يرجع:
-      {
-        "status": "active|pending|expired|banned|not_found|paused|rejected",
-        "plan": ...,
-        "license_code": ...,
-        "expire_date": "YYYY-MM-DD",
-        "name": "...",
-        "email": "...",
-        "phone": "...",
-        "suspicious_count": int
-      }
-    """
     db = load_db()
     clients = db["clients"]
 
@@ -469,7 +461,6 @@ def api_check_status():
         except:
             expire_dt = None
 
-    # فحص انتهاء الاشتراك
     today = date.today()
     if status == "active" and expire_dt and today > expire_dt:
         status = "expired"
@@ -477,7 +468,6 @@ def api_check_status():
         client["updated_at"] = now_iso()
         save_db(db)
 
-    # الحظر
     if status == "banned":
         return jsonify({
             "status": "banned",
@@ -548,14 +538,19 @@ LOGIN_TEMPLATE = """
 def admin_login():
     db = load_db()
     settings = db["settings"]
+
     if request.method == "POST":
         u = request.form.get("username", "")
         p = request.form.get("password", "")
 
         if u == settings.get("admin_user") and p == settings.get("admin_pass"):
             session["admin_logged_in"] = True
+            add_log(db, "admin_login_success", None, note=f"Login by {u}", level="info")
+            save_db(db)
             return redirect(url_for("admin_dashboard"))
         else:
+            add_log(db, "admin_login_failed", None, note=f"Failed login with user={u}", level="warning")
+            save_db(db)
             flash("بيانات الدخول غير صحيحة", "danger")
 
     return render_template_string(LOGIN_TEMPLATE)
@@ -563,12 +558,15 @@ def admin_login():
 
 @app.route("/admin/logout")
 def admin_logout():
+    db = load_db()
+    add_log(db, "admin_logout", None, note="Admin logged out", level="info")
+    save_db(db)
     session.clear()
     return redirect(url_for("admin_login"))
 
 
 # ============================================================
-#  4) لوحة الأدمن – Dashboard
+#  4) لوحة الأدمن – Dashboard PRO
 # ============================================================
 
 DASHBOARD_TEMPLATE = """
@@ -576,7 +574,7 @@ DASHBOARD_TEMPLATE = """
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8">
-  <title>لوحة التفعيل - Ayman</title>
+  <title>لوحة التفعيل PRO - Ayman</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
   <style>
     body { background:#f5f5f5; }
@@ -585,246 +583,338 @@ DASHBOARD_TEMPLATE = """
     .status-banned  { background-color:#ffebee; }
     .status-expired { background-color:#fff3e0; }
     .status-paused  { background-color:#e3f2fd; }
+    .sidebar {
+      min-height: 100vh;
+      background: #212529;
+      color: #fff;
+    }
+    .sidebar a {
+      color: #ddd;
+      text-decoration: none;
+      display: block;
+      padding: 8px 12px;
+      border-radius: 4px;
+      margin-bottom: 4px;
+    }
+    .sidebar a.active, .sidebar a:hover {
+      background: #495057;
+      color: #fff;
+    }
   </style>
 </head>
 <body>
-<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+<nav class="navbar navbar-dark bg-dark">
   <div class="container-fluid">
-    <span class="navbar-brand">لوحة تفعيل AutoClicker</span>
+    <span class="navbar-brand">لوحة تفعيل AutoClicker PRO</span>
     <div class="d-flex">
-      <a href="#banned" class="btn btn-outline-danger btn-sm mx-1">الأجهزة المحظورة</a>
       <a href="{{ url_for('admin_settings') }}" class="btn btn-outline-light btn-sm mx-1">الإعدادات</a>
+      <a href="{{ url_for('admin_logs') }}" class="btn btn-outline-info btn-sm mx-1">السجلات (Logs)</a>
       <a href="{{ url_for('admin_logout') }}" class="btn btn-outline-warning btn-sm mx-1">خروج</a>
     </div>
   </div>
 </nav>
 
-<div class="container-fluid mt-3">
+<div class="container-fluid">
+  <div class="row">
+    <!-- Sidebar -->
+    <div class="col-md-2 sidebar p-3">
+      <h6 class="text-uppercase text-muted">القائمة</h6>
+      <a href="{{ url_for('admin_dashboard') }}" class="active">Dashboard</a>
+      <a href="#pending">طلبات التفعيل (Pending)</a>
+      <a href="#active">الأجهزة المفعّلة (Active)</a>
+      <a href="#banned">الأجهزة المحظورة (Banned)</a>
+      <a href="{{ url_for('admin_logs') }}">سجلات النظام (Logs)</a>
+      <a href="{{ url_for('admin_settings') }}">إعدادات السيرفر</a>
+    </div>
 
-  {% with messages = get_flashed_messages(with_categories=true) %}
-  {% if messages %}
-    {% for cat, msg in messages %}
-      <div class="alert alert-{{cat}} py-1 my-1">{{ msg }}</div>
-    {% endfor %}
-  {% endif %}
-  {% endwith %}
+    <!-- Main content -->
+    <div class="col-md-10 py-3">
 
-  <div class="row mb-3">
-    <div class="col-md-3">
-      <div class="card text-bg-warning mb-2">
-        <div class="card-body py-2">
-          <div class="d-flex justify-content-between">
-            <span>Pending</span>
-            <strong>{{ pending_count }}</strong>
+      {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for cat, msg in messages %}
+          <div class="alert alert-{{cat}} py-1 my-1">{{ msg }}</div>
+        {% endfor %}
+      {% endif %}
+      {% endwith %}
+
+      <!-- كروت الإحصائيات -->
+      <div class="row mb-3">
+        <div class="col-md-2">
+          <div class="card text-bg-warning mb-2">
+            <div class="card-body py-2">
+              <div class="d-flex justify-content-between">
+                <span>Pending</span>
+                <strong>{{ pending_count }}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-2">
+          <div class="card text-bg-success mb-2">
+            <div class="card-body py-2">
+              <div class="d-flex justify-content-between">
+                <span>Active</span>
+                <strong>{{ active_count }}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-2">
+          <div class="card text-bg-danger mb-2">
+            <div class="card-body py-2">
+              <div class="d-flex justify-content-between">
+                <span>Banned</span>
+                <strong>{{ banned_count }}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-2">
+          <div class="card text-bg-secondary mb-2">
+            <div class="card-body py-2">
+              <div class="d-flex justify-content-between">
+                <span>Expired</span>
+                <strong>{{ expired_count }}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-2">
+          <div class="card text-bg-info mb-2">
+            <div class="card-body py-2">
+              <div class="d-flex justify-content-between">
+                <span>Paused</span>
+                <strong>{{ paused_count }}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-2">
+          <div class="card text-bg-dark mb-2">
+            <div class="card-body py-2">
+              <div class="d-flex justify-content-between">
+                <span>Total</span>
+                <strong>{{ total_count }}</strong>
+              </div>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-    <div class="col-md-3">
-      <div class="card text-bg-success mb-2">
-        <div class="card-body py-2">
-          <div class="d-flex justify-content-between">
-            <span>Active</span>
-            <strong>{{ active_count }}</strong>
-          </div>
+
+      <!-- مخطط Chart.js -->
+      <div class="card mb-3">
+        <div class="card-header">مخطط حالة الأجهزة</div>
+        <div class="card-body">
+          <canvas id="statusChart" height="80"></canvas>
         </div>
       </div>
-    </div>
-    <div class="col-md-3">
-      <div class="card text-bg-danger mb-2">
-        <div class="card-body py-2">
-          <div class="d-flex justify-content-between">
-            <span>Banned</span>
-            <strong>{{ banned_count }}</strong>
+
+      <!-- تبويبات -->
+      <ul class="nav nav-tabs" id="myTab" role="tablist">
+        <li class="nav-item" role="presentation">
+          <button class="nav-link active" id="pending-tab" data-bs-toggle="tab" data-bs-target="#pending" type="button" role="tab">طلبات التفعيل (Pending)</button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="active-tab" data-bs-toggle="tab" data-bs-target="#active" type="button" role="tab">الأجهزة المفعّلة (Active)</button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="banned-tab" data-bs-toggle="tab" data-bs-target="#banned" type="button" role="tab">الأجهزة المحظورة (Banned)</button>
+        </li>
+      </ul>
+
+      <div class="tab-content mt-3">
+        <!-- Pending -->
+        <div class="tab-pane fade show active" id="pending" role="tabpanel">
+          <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th>#</th>
+                  <th>الاسم</th>
+                  <th>البريد</th>
+                  <th>الهاتف</th>
+                  <th>Machine ID</th>
+                  <th>الخطة</th>
+                  <th>طلب في</th>
+                  <th>إجراءات</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for c in pending %}
+                <tr class="status-pending">
+                  <td>{{ loop.index }}</td>
+                  <td>{{ c.name }}</td>
+                  <td>{{ c.email }}</td>
+                  <td>{{ c.phone }}</td>
+                  <td>
+                    <a href="{{ url_for('admin_device', mid=c.machine_id) }}">{{ c.machine_id_display }}</a>
+                  </td>
+                  <td>{{ c.plan }}</td>
+                  <td>{{ c.created_at }}</td>
+                  <td>
+                    <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
+                      <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
+                      <input type="hidden" name="action" value="activate">
+                      <button class="btn btn-success btn-sm">تفعيل 30/365 حسب الخطة</button>
+                    </form>
+                    <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
+                      <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
+                      <input type="hidden" name="action" value="reject">
+                      <button class="btn btn-secondary btn-sm">رفض</button>
+                    </form>
+                    <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
+                      <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
+                      <input type="hidden" name="action" value="ban">
+                      <input type="hidden" name="reason" value="Suspicious or fake data">
+                      <button class="btn btn-danger btn-sm">حظر</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
           </div>
         </div>
-      </div>
-    </div>
-    <div class="col-md-3">
-      <div class="card text-bg-secondary mb-2">
-        <div class="card-body py-2">
-          <div class="d-flex justify-content-between">
-            <span>All Devices</span>
-            <strong>{{ total_count }}</strong>
+
+        <!-- Active -->
+        <div class="tab-pane fade" id="active" role="tabpanel">
+          <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th>#</th>
+                  <th>الاسم</th>
+                  <th>البريد</th>
+                  <th>Machine ID</th>
+                  <th>الخطة</th>
+                  <th>ينتهي في</th>
+                  <th>محاولات تلاعب</th>
+                  <th>إجراءات</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for c in active %}
+                <tr class="status-active">
+                  <td>{{ loop.index }}</td>
+                  <td>{{ c.name }}</td>
+                  <td>{{ c.email }}</td>
+                  <td>
+                    <a href="{{ url_for('admin_device', mid=c.machine_id) }}">{{ c.machine_id_display }}</a>
+                  </td>
+                  <td>{{ c.plan }}</td>
+                  <td>{{ c.expire_date }}</td>
+                  <td>{{ c.suspicious_count or 0 }}</td>
+                  <td>
+                    <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
+                      <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
+                      <input type="hidden" name="action" value="renew">
+                      <button class="btn btn-primary btn-sm">تجديد (نفس الخطة)</button>
+                    </form>
+                    <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
+                      <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
+                      <input type="hidden" name="action" value="pause">
+                      <button class="btn btn-warning btn-sm">إيقاف مؤقت</button>
+                    </form>
+                    <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
+                      <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
+                      <input type="hidden" name="action" value="unactivate">
+                      <button class="btn btn-secondary btn-sm">إلغاء التفعيل</button>
+                    </form>
+                    <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
+                      <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
+                      <input type="hidden" name="action" value="ban">
+                      <input type="hidden" name="reason" value="Banned from Admin Panel">
+                      <button class="btn btn-danger btn-sm">حظر</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
           </div>
         </div>
+
+        <!-- Banned -->
+        <div class="tab-pane fade" id="banned" role="tabpanel">
+          <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th>#</th>
+                  <th>الاسم</th>
+                  <th>Machine ID</th>
+                  <th>السبب</th>
+                  <th>آخر تحديث</th>
+                  <th>إجراءات</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for c in banned %}
+                <tr class="status-banned">
+                  <td>{{ loop.index }}</td>
+                  <td>{{ c.name }}</td>
+                  <td>
+                    <a href="{{ url_for('admin_device', mid=c.machine_id) }}">{{ c.machine_id_display }}</a>
+                  </td>
+                  <td>{{ c.banned_reason or "-" }}</td>
+                  <td>{{ c.updated_at or c.created_at }}</td>
+                  <td>
+                    <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
+                      <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
+                      <input type="hidden" name="action" value="unban">
+                      <button class="btn btn-success btn-sm">إلغاء الحظر</button>
+                    </form>
+                    <form class="d-inline" method="post" action="{{ url_for('admin_action') }}"
+                          onsubmit="return confirm('هل أنت متأكد من الحذف النهائي لهذا الجهاز من النظام؟');">
+                      <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
+                      <input type="hidden" name="action" value="delete">
+                      <button class="btn btn-outline-danger btn-sm">حذف نهائي</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
       </div>
     </div>
-  </div>
-
-  <!-- تبويبات -->
-  <ul class="nav nav-tabs" id="myTab" role="tablist">
-    <li class="nav-item" role="presentation">
-      <button class="nav-link active" id="pending-tab" data-bs-toggle="tab" data-bs-target="#pending" type="button" role="tab">طلبات التفعيل (Pending)</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" id="active-tab" data-bs-toggle="tab" data-bs-target="#active" type="button" role="tab">الأجهزة المفعّلة (Active)</button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" id="banned-tab" data-bs-toggle="tab" data-bs-target="#banned" type="button" role="tab">الأجهزة المحظورة (Banned)</button>
-    </li>
-  </ul>
-
-  <div class="tab-content mt-3">
-    <!-- Pending -->
-    <div class="tab-pane fade show active" id="pending" role="tabpanel">
-      <div class="table-responsive">
-        <table class="table table-sm table-hover align-middle">
-          <thead class="table-light">
-            <tr>
-              <th>#</th>
-              <th>الاسم</th>
-              <th>البريد</th>
-              <th>الهاتف</th>
-              <th>Machine ID</th>
-              <th>الخطة</th>
-              <th>طلب في</th>
-              <th>إجراءات</th>
-            </tr>
-          </thead>
-          <tbody>
-          {% for c in pending %}
-            <tr class="status-pending">
-              <td>{{ loop.index }}</td>
-              <td>{{ c.name }}</td>
-              <td>{{ c.email }}</td>
-              <td>{{ c.phone }}</td>
-              <td>
-                <a href="{{ url_for('admin_device', mid=c.machine_id) }}">{{ c.machine_id_display }}</a>
-              </td>
-              <td>{{ c.plan }}</td>
-              <td>{{ c.created_at }}</td>
-              <td>
-                <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
-                  <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
-                  <input type="hidden" name="action" value="activate">
-                  <button class="btn btn-success btn-sm">تفعيل 30/365 حسب الخطة</button>
-                </form>
-                <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
-                  <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
-                  <input type="hidden" name="action" value="reject">
-                  <button class="btn btn-secondary btn-sm">رفض</button>
-                </form>
-                <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
-                  <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
-                  <input type="hidden" name="action" value="ban">
-                  <input type="hidden" name="reason" value="Suspicious or fake data">
-                  <button class="btn btn-danger btn-sm">حظر</button>
-                </form>
-              </td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Active -->
-    <div class="tab-pane fade" id="active" role="tabpanel">
-      <div class="table-responsive">
-        <table class="table table-sm table-hover align-middle">
-          <thead class="table-light">
-            <tr>
-              <th>#</th>
-              <th>الاسم</th>
-              <th>البريد</th>
-              <th>Machine ID</th>
-              <th>الخطة</th>
-              <th>ينتهي في</th>
-              <th>محاولات تلاعب</th>
-              <th>إجراءات</th>
-            </tr>
-          </thead>
-          <tbody>
-          {% for c in active %}
-            <tr class="status-active">
-              <td>{{ loop.index }}</td>
-              <td>{{ c.name }}</td>
-              <td>{{ c.email }}</td>
-              <td>
-                <a href="{{ url_for('admin_device', mid=c.machine_id) }}">{{ c.machine_id_display }}</a>
-              </td>
-              <td>{{ c.plan }}</td>
-              <td>{{ c.expire_date }}</td>
-              <td>{{ c.suspicious_count or 0 }}</td>
-              <td>
-                <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
-                  <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
-                  <input type="hidden" name="action" value="renew">
-                  <button class="btn btn-primary btn-sm">تجديد (نفس الخطة)</button>
-                </form>
-                <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
-                  <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
-                  <input type="hidden" name="action" value="pause">
-                  <button class="btn btn-warning btn-sm">إيقاف مؤقت</button>
-                </form>
-                <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
-                  <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
-                  <input type="hidden" name="action" value="unactivate">
-                  <button class="btn btn-secondary btn-sm">إلغاء التفعيل</button>
-                </form>
-                <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
-                  <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
-                  <input type="hidden" name="action" value="ban">
-                  <input type="hidden" name="reason" value="Banned from Admin Panel">
-                  <button class="btn btn-danger btn-sm">حظر</button>
-                </form>
-              </td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Banned -->
-    <div class="tab-pane fade" id="banned" role="tabpanel">
-      <div class="table-responsive">
-        <table class="table table-sm table-hover align-middle">
-          <thead class="table-light">
-            <tr>
-              <th>#</th>
-              <th>الاسم</th>
-              <th>Machine ID</th>
-              <th>السبب</th>
-              <th>آخر تحديث</th>
-              <th>إجراءات</th>
-            </tr>
-          </thead>
-          <tbody>
-          {% for c in banned %}
-            <tr class="status-banned">
-              <td>{{ loop.index }}</td>
-              <td>{{ c.name }}</td>
-              <td>
-                <a href="{{ url_for('admin_device', mid=c.machine_id) }}">{{ c.machine_id_display }}</a>
-              </td>
-              <td>{{ c.banned_reason or "-" }}</td>
-              <td>{{ c.updated_at or c.created_at }}</td>
-              <td>
-                <form class="d-inline" method="post" action="{{ url_for('admin_action') }}">
-                  <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
-                  <input type="hidden" name="action" value="unban">
-                  <button class="btn btn-success btn-sm">إلغاء الحظر</button>
-                </form>
-                <form class="d-inline" method="post" action="{{ url_for('admin_action') }}"
-                      onsubmit="return confirm('هل أنت متأكد من الحذف النهائي لهذا الجهاز من النظام؟');">
-                  <input type="hidden" name="machine_id" value="{{ c.machine_id }}">
-                  <input type="hidden" name="action" value="delete">
-                  <button class="btn btn-outline-danger btn-sm">حذف نهائي</button>
-                </form>
-              </td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-
   </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  const statusData = {{ status_counts|tojson }};
+  const ctx = document.getElementById('statusChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['Pending', 'Active', 'Banned', 'Expired', 'Paused'],
+      datasets: [{
+        label: 'عدد الأجهزة',
+        data: [
+          statusData.pending,
+          statusData.active,
+          statusData.banned,
+          statusData.expired,
+          statusData.paused
+        ]
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false }
+      },
+      scales: {
+        y: { beginAtZero: true }
+      }
+    }
+  });
+</script>
 </body>
 </html>
 """
@@ -838,6 +928,17 @@ def admin_dashboard():
     pending = [c for c in clients if c.get("status") == "pending"]
     active  = [c for c in clients if c.get("status") == "active"]
     banned  = [c for c in clients if c.get("status") == "banned"]
+    expired = [c for c in clients if c.get("status") == "expired"]
+    paused  = [c for c in clients if c.get("status") == "paused"]
+
+    status_counts = {
+        "pending": len(pending),
+        "active": len(active),
+        "banned": len(banned),
+        "expired": len(expired),
+        "paused": len(paused),
+        "total": len(clients)
+    }
 
     return render_template_string(
         DASHBOARD_TEMPLATE,
@@ -847,7 +948,10 @@ def admin_dashboard():
         pending_count=len(pending),
         active_count=len(active),
         banned_count=len(banned),
-        total_count=len(clients)
+        expired_count=len(expired),
+        paused_count=len(paused),
+        total_count=len(clients),
+        status_counts=status_counts
     )
 
 
@@ -922,7 +1026,7 @@ def admin_device(mid):
 
 
 # ============================================================
-#  6) إعدادات اللوحة
+#  6) إعدادات اللوحة (Settings)
 # ============================================================
 
 SETTINGS_TEMPLATE = """
@@ -1030,7 +1134,6 @@ SETTINGS_TEMPLATE = """
 </html>
 """
 
-
 @app.route("/admin/settings", methods=["GET", "POST"])
 @login_required
 def admin_settings():
@@ -1052,6 +1155,7 @@ def admin_settings():
         settings["smtp_ssl"] = True if request.form.get("smtp_ssl") == "on" else False
         settings["admin_notify_email"] = request.form.get("admin_notify_email", settings["admin_notify_email"])
 
+        add_log(db, "admin_update_settings", None, note="تم تعديل إعدادات السيرفر", level="info")
         save_db(db)
         flash("تم حفظ الإعدادات بنجاح ✔", "success")
         return redirect(url_for("admin_settings"))
@@ -1060,7 +1164,7 @@ def admin_settings():
 
 
 # ============================================================
-#  7) إجراءات الأدمن (تفعيل، تجديد، حظر، إلغاء حظر، إلخ)
+#  7) إجراءات الأدمن (تفعيل، تجديد، حظر، إلخ)
 # ============================================================
 
 @app.route("/admin/action", methods=["POST"])
@@ -1085,7 +1189,6 @@ def admin_action():
     today = date.today()
     now = now_iso()
 
-    # عدد الأيام حسب الخطة أو مخصص
     def calc_days(plan):
         if days_custom:
             try:
@@ -1104,15 +1207,13 @@ def admin_action():
         client["license_code"] = code
         client["expire_date"] = exp.isoformat()
         client["updated_at"] = now
-        save_db(db)
-        # إرسال إيميل تفعيل
         send_activation_email(client, settings, is_renew=False)
+        add_log(db, "activate", client["machine_id"], note=f"تفعيل الجهاز حتى {exp.isoformat()}", level="success")
         flash("تم تفعيل الجهاز وتم إرسال إيميل للعميل (إن وُجد بريد).", "success")
 
     elif action == "renew":
         plan = client.get("plan") or settings.get("default_plan", "M")
         days = calc_days(plan)
-        # التجديد من تاريخ الانتهاء الحالي إن وجد وإلا من اليوم
         base_date = today
         if client.get("expire_date"):
             try:
@@ -1126,27 +1227,26 @@ def admin_action():
         client["plan"] = plan
         client["expire_date"] = exp.isoformat()
         client["updated_at"] = now
-        save_db(db)
-        # إرسال إيميل تجديد
         send_activation_email(client, settings, is_renew=True)
+        add_log(db, "renew", client["machine_id"], note=f"تجديد الاشتراك حتى {exp.isoformat()}", level="info")
         flash("تم تجديد الاشتراك وتم إرسال إيميل للعميل (إن وُجد بريد).", "success")
 
     elif action == "pause":
         client["status"] = "paused"
         client["updated_at"] = now
-        save_db(db)
+        add_log(db, "pause", client["machine_id"], note="إيقاف مؤقت للجهاز", level="warning")
         flash("تم إيقاف الجهاز مؤقتاً (Paused)", "warning")
 
     elif action == "unactivate":
         client["status"] = "expired"
         client["updated_at"] = now
-        save_db(db)
+        add_log(db, "unactivate", client["machine_id"], note="إلغاء التفعيل وتحويله إلى Expired", level="info")
         flash("تم إلغاء تفعيل الجهاز (تحويله إلى Expired)", "secondary")
 
     elif action == "reject":
         client["status"] = "rejected"
         client["updated_at"] = now
-        save_db(db)
+        add_log(db, "reject", client["machine_id"], note="رفض طلب التفعيل", level="info")
         flash("تم رفض طلب التفعيل", "secondary")
 
     elif action == "ban":
@@ -1155,20 +1255,20 @@ def admin_action():
         client["license_code"] = None
         client["expire_date"] = None
         client["updated_at"] = now
-        save_db(db)
+        add_log(db, "ban", client["machine_id"], note=f"حظر الجهاز. السبب: {client['banned_reason']}", level="danger")
         flash("تم حظر الجهاز", "danger")
 
     elif action == "unban":
         client["status"] = "pending"
         client["banned_reason"] = None
         client["updated_at"] = now
-        save_db(db)
+        add_log(db, "unban", client["machine_id"], note="إلغاء الحظر. حالة الجهاز الآن Pending", level="success")
         flash("تم إلغاء الحظر. حالة الجهاز الآن Pending", "success")
 
     elif action == "delete":
         try:
             clients.remove(client)
-            save_db(db)
+            add_log(db, "delete", mid_norm, note="حذف نهائي للجهاز من قاعدة البيانات", level="warning")
             flash("تم حذف الجهاز نهائيًا من قاعدة البيانات.", "warning")
         except ValueError:
             flash("تعذر حذف هذا الجهاز (غير موجود في القائمة).", "danger")
@@ -1176,6 +1276,7 @@ def admin_action():
     else:
         flash("إجراء غير معروف", "danger")
 
+    save_db(db)
     return redirect(url_for("admin_dashboard"))
 
 
@@ -1199,11 +1300,83 @@ def test_smtp():
     )
 
     if ok:
+        add_log(db, "test_smtp_ok", None, note=f"SMTP Test OK -> {test_email}", level="success")
         flash(f"✔ تم إرسال رسالة اختبار إلى {test_email}", "success")
     else:
+        add_log(db, "test_smtp_fail", None, note="SMTP Test Failed", level="danger")
         flash("✖ فشل في الإرسال. تأكد من إعدادات SMTP.", "danger")
 
+    save_db(db)
     return redirect(url_for("admin_settings"))
+
+
+# ============================================================
+#  8) صفحة السجلات (Logs)
+# ============================================================
+
+LOGS_TEMPLATE = """
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <title>سجلات السيرفر (Logs)</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-dark bg-dark">
+  <div class="container-fluid">
+    <span class="navbar-brand">سجلات السيرفر (Logs)</span>
+    <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-light btn-sm">رجوع للوحة</a>
+  </div>
+</nav>
+
+<div class="container my-3">
+  <div class="card">
+    <div class="card-header">
+      آخر {{ logs|length }} عملية
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm table-striped mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>#</th>
+              <th>الوقت (UTC)</th>
+              <th>العملية</th>
+              <th>Machine ID</th>
+              <th>الوصف</th>
+              <th>المستوى</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for log in logs %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td>{{ log.time }}</td>
+              <td>{{ log.action }}</td>
+              <td>{{ log.machine_id or "-" }}</td>
+              <td>{{ log.note or "-" }}</td>
+              <td>{{ log.level or "-" }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+"""
+
+@app.route("/admin/logs")
+@login_required
+def admin_logs():
+    db = load_db()
+    logs = db.get("logs", [])
+    # نعرض آخر 200 فقط
+    logs = logs[-200:]
+    return render_template_string(LOGS_TEMPLATE, logs=logs)
 
 
 # ============================================================
@@ -1211,5 +1384,4 @@ def test_smtp():
 # ============================================================
 
 if __name__ == "__main__":
-    # للتجربة محلياً:
     app.run(host="0.0.0.0", port=5050, debug=True)
