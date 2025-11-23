@@ -33,7 +33,7 @@ DEFAULT_SECRET_KEY = "AYMAN_SUPER_SECRET_2025"
 
 # بيانات الأدمن الافتراضية (يمكن تعديلها من صفحة الإعدادات)
 DEFAULT_ADMIN_USER = "admin"
-DEFAULT_ADMIN_PASS = "admin1234" # ⚠️ سيتم تشفيره عند أول عملية حفظ
+DEFAULT_ADMIN_PASS = "admin1234" 
 DEFAULT_ADMIN_PASS_HASH = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918" # SHA256(admin1234)
 
 # رقم الواتساب الافتراضي
@@ -59,8 +59,7 @@ def load_db():
 
     default_settings = {
         "admin_user": DEFAULT_ADMIN_USER,
-        "admin_pass_hash": DEFAULT_ADMIN_PASS_HASH, # تخزين الهاش مباشرة
-        "admin_pass": DEFAULT_ADMIN_PASS, # تخزين القيمة النصية لتحديثها من الأدمن
+        "admin_pass_hash": DEFAULT_ADMIN_PASS_HASH,
         "secret_key": DEFAULT_SECRET_KEY,
         "default_plan": "M",
         "max_devices": 1000,
@@ -79,9 +78,6 @@ def load_db():
     }
 
     if not os.path.exists(DB_FILE):
-        # تشفير كلمة المرور الافتراضية إذا كان الملف غير موجود
-        default_settings["admin_pass_hash"] = hashlib.sha256(DEFAULT_ADMIN_PASS.encode("utf-8")).hexdigest()
-        
         return {
             "settings": default_settings.copy(),
             "clients": []
@@ -103,11 +99,11 @@ def load_db():
         for k, v in default_settings.items():
             if k not in data["settings"]:
                 data["settings"][k] = v
-
-    # تحويل كلمة المرور النصية القديمة إلى هاش عند التحميل (مرة واحدة)
+    
+    # تحويل كلمة المرور النصية القديمة إلى هاش عند التحميل (لتصحيح الإصدارات القديمة)
     if "admin_pass" in data["settings"] and data["settings"].get("admin_pass") and len(data["settings"]["admin_pass"]) < 60:
         data["settings"]["admin_pass_hash"] = hashlib.sha256(data["settings"]["admin_pass"].encode("utf-8")).hexdigest()
-        del data["settings"]["admin_pass"] # حذف القيمة النصية للامان
+        del data["settings"]["admin_pass"] 
 
     if "clients" not in data or not isinstance(data["clients"], list):
         data["clients"] = []
@@ -117,7 +113,7 @@ def load_db():
 
 def save_db(db):
     """حفظ قاعدة البيانات"""
-    # للتأكد من حفظ الهاش وليس النص الواضح
+    # التأكد من حفظ الهاش وليس النص الواضح
     if "admin_pass" in db["settings"]:
          del db["settings"]["admin_pass"] 
 
@@ -545,7 +541,6 @@ def admin_login():
         u = request.form.get("username", "")
         p = request.form.get("password", "")
         
-        # تشفير كلمة المرور المدخلة للمقارنة مع الهاش المخزن
         p_hash = hashlib.sha256(p.encode("utf-8")).hexdigest()
 
         if u == settings.get("admin_user") and p_hash == settings.get("admin_pass_hash"):
@@ -825,6 +820,55 @@ DASHBOARD_TEMPLATE = """
 """
 
 
+def check_online_status_flag(client):
+    """
+    يحوّل is_online إلى True/False بناء على آخر ظهور last_seen_at.
+    إذا مرّ أكثر من 150 ثانية → Offline.
+    """
+    last_seen = client.get("last_seen_at")
+    if not last_seen:
+        client["is_online"] = False
+        return
+
+    try:
+        dt = datetime.fromisoformat(last_seen)
+    except Exception:
+        client["is_online"] = False
+        return
+
+    if datetime.utcnow() - dt > timedelta(seconds=150):
+        client["is_online"] = False
+    else:
+        client["is_online"] = True
+
+
+@app.route("/admin")
+@login_required
+def admin_dashboard():
+    db = load_db()
+    clients = db["clients"]
+
+    for c in clients:
+        check_online_status_flag(c)
+
+    pending = [c for c in clients if c.get("status") == "pending"]
+    active  = [c for c in clients if c.get("status") == "active"]
+    banned  = [c for c in clients if c.get("status") == "banned"]
+    other = [c for c in clients if c.get("status") not in ("pending", "active", "banned")]
+    active_display = active + other
+
+    return render_template_string(
+        DASHBOARD_TEMPLATE,
+        pending=pending,
+        active=active_display,
+        banned=banned,
+        pending_count=len(pending),
+        active_count=len(active),
+        banned_count=len(banned),
+        total_count=len(clients)
+    )
+
+
 # ============================================================
 #  6) صفحة تفاصيل جهاز
 # ============================================================
@@ -901,6 +945,12 @@ def admin_device(mid):
     
     if client:
         check_online_status_flag(client)
+    
+    # يجب استيراد 'tojson' في Flask لتشغيل هذا القالب بشكل سليم
+    from jinja2 import environment
+    if not hasattr(environment.Environment, 'tojson'):
+        # يضمن وجود الفلتر tojson اذا لم يكن معرفًا
+        environment.Environment.globals['tojson'] = json.dumps 
     
     return render_template_string(DEVICE_TEMPLATE, client=client)
 
@@ -1034,7 +1084,6 @@ def admin_settings():
 
     if request.method == "POST":
         
-        # 1. تحديث بيانات الدخول (يتم التعامل مع الهاش هنا)
         new_pass = request.form.get("admin_pass", "").strip()
         if new_pass:
             settings["admin_pass_hash"] = hashlib.sha256(new_pass.encode("utf-8")).hexdigest()
@@ -1042,13 +1091,11 @@ def admin_settings():
         
         settings["admin_user"] = request.form.get("admin_user", settings["admin_user"])
         
-        # 2. تحديث إعدادات التفعيل العامة
         settings["secret_key"] = request.form.get("secret_key", settings["secret_key"])
         settings["default_plan"] = request.form.get("default_plan", settings["default_plan"])
         settings["download_url"] = request.form.get("download_url", settings["download_url"])
         settings["admin_whatsapp"] = request.form.get("admin_whatsapp", settings["admin_whatsapp"])
 
-        # 3. تحديث إعدادات SMTP
         settings["email_enabled"] = request.form.get("email_enabled") == "on"
         settings["smtp_server"] = request.form.get("smtp_server", settings["smtp_server"])
         settings["smtp_port"] = int(request.form.get("smtp_port", settings["smtp_port"]))
@@ -1090,7 +1137,7 @@ def test_smtp():
     if ok:
         flash(f"✔ تم إرسال رسالة اختبار إلى {test_email}", "success")
     else:
-        flash("✖ فشل في الإرسال. تأكد من إعدادات SMTP (خاصة كلمة المرور والمنفذ).", "danger")
+        flash("✖ فشل في الإرسال. تأكد من إعدادات SMTP.", "danger")
 
     return redirect(url_for("admin_settings"))
 
@@ -1115,7 +1162,6 @@ def check_online_status_flag(client):
         client["is_online"] = False
         return
 
-    # 150 ثانية هي فترة السماح (يجب أن يكون الـ Heartbeat أسرع من هذه الفترة)
     if datetime.utcnow() - dt > timedelta(seconds=150):
         client["is_online"] = False
     else:
@@ -1128,18 +1174,13 @@ def admin_dashboard():
     db = load_db()
     clients = db["clients"]
 
-    # حساب Online/Offline لكل جهاز
     for c in clients:
         check_online_status_flag(c)
 
     pending = [c for c in clients if c.get("status") == "pending"]
-    active = [c for c in clients if c.get("status") == "active"]
-    banned = [c for c in clients if c.get("status") == "banned"]
-    
-    # فلترة الحالات الأخرى (expired, rejected, paused)
+    active  = [c for c in clients if c.get("status") == "active"]
+    banned  = [c for c in clients if c.get("status") == "banned"]
     other = [c for c in clients if c.get("status") not in ("pending", "active", "banned")]
-
-    # دمج Active والـ Other في قائمة العرض لتسهيل الإدارة
     active_display = active + other
 
     return render_template_string(
@@ -1164,6 +1205,11 @@ def admin_device(mid):
     if client:
         check_online_status_flag(client)
     
+    # يجب استيراد 'tojson' من Flask ليعمل الفلتر في القالب
+    from jinja2 import environment
+    if not hasattr(environment.Environment, 'tojson'):
+        environment.Environment.globals['tojson'] = json.dumps 
+    
     return render_template_string(DEVICE_TEMPLATE, client=client)
 
 
@@ -1181,8 +1227,6 @@ def admin_action():
     raw_mid = request.form.get("machine_id", "")
     action = request.form.get("action", "")
     reason = request.form.get("reason", "").strip()
-    
-    # يمكن تطوير هذه الدوال لاحقا لقبول مدة مخصصة (days_custom)
     
     mid_norm = normalize_machine_id(raw_mid)
     client = find_client_by_mid(clients, mid_norm)
@@ -1217,10 +1261,9 @@ def admin_action():
         base_date = today
         if client.get("expire_date"):
             try:
-                # إذا كان منتهي، نبدأ من تاريخ الانتهاء الحالي
                 base_date = datetime.strptime(client["expire_date"], "%Y-%m-%d").date()
                 if base_date < today:
-                    base_date = today # نبدأ من اليوم إذا كان التاريخ الماضي
+                    base_date = today
             except Exception:
                 base_date = today
         
@@ -1263,14 +1306,25 @@ def admin_action():
         flash(f"⛔ تم حظر الجهاز {client['machine_id_display']}.", "danger")
 
     elif action == "unban":
-        client["status"] = "pending" # أو active إذا كان لديه صلاحية سابقة (للتسهيل نضعه pending)
+        # محاولة تعيين الحالة إلى Active إذا كان لديه كود وتاريخ صلاحية في المستقبل، وإلا Pending
+        exp_dt = None
+        if client.get("expire_date"):
+            try:
+                exp_dt = datetime.strptime(client["expire_date"], "%Y-%m-%d").date()
+            except:
+                pass
+        
+        if client.get("license_code") and exp_dt and exp_dt >= today:
+             client["status"] = "active"
+        else:
+             client["status"] = "pending"
+             
         client["banned_reason"] = None
         client["updated_at"] = now
         save_db(db)
-        flash(f"✅ تم إلغاء الحظر عن الجهاز {client['machine_id_display']}. (الحالة Pending)", "success")
+        flash(f"✅ تم إلغاء الحظر عن الجهاز {client['machine_id_display']}. (الحالة الآن {client['status']})", "success")
         
     elif action == "delete":
-        # حذف نهائي (عادةً يكون عبر زر حذف منفصل أو تأكيد)
         clients.remove(client)
         save_db(db)
         flash(f"🗑️ تم حذف {client['machine_id_display']} نهائياً.", "info")
@@ -1287,5 +1341,5 @@ def admin_action():
 # ============================================================
 
 if __name__ == "__main__":
-    # تشغيل الخادم
+    # هذا للتجربة محلياً فقط.
     app.run(host="0.0.0.0", port=5000, debug=True)
