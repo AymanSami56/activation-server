@@ -1247,3 +1247,5 @@ def admin_action():
 if __name__ == "__main__":
     # للتجربة محلياً:
     app.run(host="0.0.0.0", port=5050, debug=True)
+
+
